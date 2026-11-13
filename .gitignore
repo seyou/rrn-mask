@@ -1,7 +1,12 @@
 .gradle/
 .idea/
 build/
-models/
+# Bundled: the default detector (v6-tiny) and the only Korean recognizer. Other models: scripts/fetch-models.sh.
+models/*
+!models/PP-OCRv6_det_tiny.onnx
+!models/korean_PP-OCRv5_rec_mobile.onnx
+!models/LICENSE-PaddleOCR
+!models/NOTICE
 fonts/
 out/
 # Real shareholder registers carry resident registration numbers. Never commit them.

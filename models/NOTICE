@@ -1,0 +1,13 @@
+The ONNX models in this directory are redistributed unmodified under the Apache License 2.0
+(LICENSE-PaddleOCR).
+
+  PP-OCRv6_det_tiny.onnx            PP-OCRv6 tiny text detection
+  korean_PP-OCRv5_rec_mobile.onnx   PP-OCRv5 Korean text recognition (dictionary embedded as metadata)
+
+Models: PaddleOCR, Copyright PaddlePaddle Authors, https://github.com/PaddlePaddle/PaddleOCR
+ONNX conversion: RapidOCR, Copyright RapidOCR Authors, https://github.com/RapidAI/RapidOCR
+Source: https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/
+
+sha256
+  f42c0fbd294d95eac1a550e131b277dac97462c8025fa4b6c3cec1b7894bd3d5  PP-OCRv6_det_tiny.onnx
+  cd6e2ea50f6943ca7271eb8c56a877a5a90720b7047fe9c41a2e541a25773c9b  korean_PP-OCRv5_rec_mobile.onnx
