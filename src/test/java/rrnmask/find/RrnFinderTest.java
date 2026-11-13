@@ -138,6 +138,29 @@ class RrnFinderTest {
     }
 
     @Test
+    void columnStopsAtAFooterLineDirectlyBelowTheTable() {
+        TextLine header = line(100, 0, "실명번호");
+        TextLine cell = line(100, 40, "900101-12345");
+        // Starts at the page margin, centred in the column, no vertical gap: not a cell.
+        TextLine footer = line(40, 80, "문의:02-6779-8976");
+        List<Finding> found = finder.find(List.of(header, cell, footer));
+        assertEquals(1, found.size());
+        assertTrue(found.getFirst().mask().intersects(cell.box()));
+    }
+
+    @Test
+    void columnUnderAMergedHeaderStopsAtTheGapAfterTheLastRow() {
+        // OCR merged the header row into one wide box, so only the vertical rhythm marks the table's end.
+        TextLine header = line(0, 0, "번호 주주명 실명번호");
+        TextLine row1 = line(70, 30, "900101-12345");
+        TextLine row2 = line(70, 60, "800101-22345");
+        TextLine footer = line(0, 120, "문의:02-6779-8976");
+        List<Finding> found = finder.find(List.of(header, row1, row2, footer));
+        assertEquals(2, found.size());
+        assertTrue(found.stream().noneMatch(f -> f.mask().intersects(footer.box())));
+    }
+
+    @Test
     void masksTheBackWhenOcrDroppedAFrontDigit() {
         List<Finding> found = finder.find(List.of(line(0, 0, "60117- 1610026")));
         assertEquals(1, found.size());

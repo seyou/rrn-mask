@@ -50,7 +50,7 @@ public final class RrnFinder {
      */
     private static final Pattern BACK_FIRST = Pattern.compile("^.{0,3}?([1-8]\\d{6})(?!\\d)");
     static final double SPLIT_GAP = 8;
-    /** A column ends where the vertical gap to the next cell exceeds this many line heights. */
+    /** Largest gap, in line heights, between the header and the first cell of its column. */
     private static final double COLUMN_BREAK = 2.5;
 
     public List<Finding> find(List<TextLine> lines) {
@@ -160,9 +160,14 @@ public final class RrnFinder {
     }
 
     /**
-     * Cells under {@code header}: horizontally within half a header width of it, stacked downward without a
-     * gap wider than {@value #COLUMN_BREAK} line heights. The run stops where the table ends, so footer lines
-     * (phone numbers, dates) below the column are not taken for cells.
+     * Cells under {@code header}: centred within half a header width of it, stacked downward. The run stops
+     * at the end of the table, so footer lines (phone numbers, dates) are not taken for cells:
+     * <ul>
+     *   <li>a vertical gap more than 2.5× the tightest row gap seen so far (plus 0.3 line heights of slack);
+     *       the first cell may sit up to {@value #COLUMN_BREAK} line heights below the header;</li>
+     *   <li>a line starting more than one header width left of the header or ending more than three past it
+     *       (text at the page margin). Numbers are wider than a short Hangul header, hence the asymmetry.</li>
+     * </ul>
      */
     private static List<TextLine> column(TextLine header, List<TextLine> lines) {
         Rectangle hb = header.box();
@@ -178,10 +183,17 @@ public final class RrnFinder {
         below.sort(Comparator.comparingInt((TextLine l) -> l.box().y));
         List<TextLine> cells = new ArrayList<>();
         double bottom = hb.getMaxY();
+        double rowGap = -1;
         for (TextLine l : below) {
             Rectangle b = l.box();
-            if (b.y - bottom > COLUMN_BREAK * Math.max(hb.height, b.height)) {
+            double h = Math.max(hb.height, b.height);
+            double gap = Math.max(0, b.y - bottom);
+            double limit = rowGap < 0 ? COLUMN_BREAK * h : 2.5 * Math.max(rowGap, 0.2 * h) + 0.3 * h;
+            if (gap > limit || b.x < hb.x - hb.width || b.getMaxX() > hb.getMaxX() + 3.0 * hb.width) {
                 break;
+            }
+            if (b.y >= bottom) {
+                rowGap = rowGap < 0 ? gap : Math.min(rowGap, gap);
             }
             cells.add(l);
             bottom = Math.max(bottom, b.getMaxY());
