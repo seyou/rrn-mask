@@ -1,6 +1,7 @@
 package rrnmask;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -16,6 +17,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import javax.imageio.ImageIO;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
@@ -49,8 +52,43 @@ class RrnMaskServiceTest {
         }
     }
 
+    /** Records whether the service closed a stream it does not own. */
+    private static final class TrackedInput extends ByteArrayInputStream {
+        boolean closed;
+
+        TrackedInput(byte[] bytes) {
+            super(bytes);
+        }
+
+        @Override
+        public void close() throws IOException {
+            closed = true;
+            super.close();
+        }
+    }
+
+    /** A text PDF, one number per page. */
+    private static byte[] pdf(int pages) throws IOException {
+        try (PDDocument doc = new PDDocument()) {
+            for (int i = 1; i <= pages; i++) {
+                PDPage p = new PDPage(PDRectangle.A4);
+                doc.addPage(p);
+                try (PDPageContentStream cs = new PDPageContentStream(doc, p)) {
+                    cs.beginText();
+                    cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA), 14);
+                    cs.newLineAtOffset(72, 700);
+                    cs.showText("Holder " + i + "  " + NUMBER);
+                    cs.endText();
+                }
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            doc.save(out);
+            return out.toByteArray();
+        }
+    }
+
     @Test
-    void masksAnInMemoryImageAndReturnsEncodedBytes() throws IOException {
+    void masksAnImageStreamAndReturnsEncodedBytes() throws IOException {
         BufferedImage img = new BufferedImage(1000, 200, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = img.createGraphics();
         g.setColor(Color.WHITE);
@@ -69,8 +107,10 @@ class RrnMaskServiceTest {
         ByteArrayOutputStream png = new ByteArrayOutputStream();
         ImageIO.write(img, "png", png);
 
-        RrnMaskService.Result result = service.redact(png.toByteArray());
+        TrackedInput in = new TrackedInput(png.toByteArray());
+        RrnMaskService.Result result = service.redact(in);
 
+        assertFalse(in.closed, "the caller owns the stream");
         assertEquals(Detector.V6_TINY, result.detector());
         assertEquals(1, result.pages().size());
         RrnMaskService.MaskedPage page = result.pages().getFirst();
@@ -86,38 +126,45 @@ class RrnMaskServiceTest {
     }
 
     @Test
-    void masksAPdfPerCallDetectorAndJpegOutput() throws IOException {
+    void streamsPdfPagesToTheSinkInOrder() throws IOException {
+        List<Integer> seen = new ArrayList<>();
+        RrnMaskService.Summary summary = service.redact(new ByteArrayInputStream(pdf(3)), page -> {
+            seen.add(page.pageNumber());
+            assertEquals(1, page.masks().size(), "page " + page.pageNumber());
+            assertEquals(page.width(), ImageIO.read(new ByteArrayInputStream(page.image())).getWidth());
+        });
+        assertEquals(List.of(1, 2, 3), seen);
+        assertEquals(new RrnMaskService.Summary(Detector.V6_TINY, 3, 3), summary);
+    }
+
+    @Test
+    void sinkFailureStopsProcessing() throws IOException {
+        List<Integer> seen = new ArrayList<>();
+        IOException e = assertThrows(IOException.class, () -> service.redact(new ByteArrayInputStream(pdf(3)), page -> {
+            seen.add(page.pageNumber());
+            throw new IOException("storage down");
+        }));
+        assertEquals("storage down", e.getMessage());
+        assertEquals(List.of(1), seen);
+    }
+
+    @Test
+    void perCallDetectorAndJpegOutput() throws IOException {
         assumeTrue(Files.isRegularFile(MODELS.resolve(Detector.V5_MOBILE.modelFile())), "v5-mobile not fetched");
-        byte[] pdf;
-        try (PDDocument doc = new PDDocument()) {
-            PDPage p = new PDPage(PDRectangle.A4);
-            doc.addPage(p);
-            try (PDPageContentStream cs = new PDPageContentStream(doc, p)) {
-                cs.beginText();
-                cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA), 14);
-                cs.newLineAtOffset(72, 700);
-                cs.showText("Holder 1  " + NUMBER);
-                cs.endText();
-            }
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            doc.save(out);
-            pdf = out.toByteArray();
-        }
         try (RrnMaskService jpeg = new RrnMaskService(RrnMaskService.Options.builder(MODELS)
                 .format(RrnMaskService.ImageFormat.JPEG).build())) {
-            RrnMaskService.Result result = jpeg.redact(pdf, Detector.V5_MOBILE);
+            RrnMaskService.Result result = jpeg.redact(new ByteArrayInputStream(pdf(1)), Detector.V5_MOBILE);
             assertEquals(Detector.V5_MOBILE, result.detector());
-            assertEquals(1, result.pages().size());
             RrnMaskService.MaskedPage page = result.pages().getFirst();
             assertEquals("image/jpeg", page.contentType());
             assertEquals(1, page.masks().size());
-            BufferedImage img = ImageIO.read(new ByteArrayInputStream(page.image()));
-            assertEquals(page.width(), img.getWidth());
+            assertEquals(page.width(), ImageIO.read(new ByteArrayInputStream(page.image())).getWidth());
         }
     }
 
     @Test
-    void rejectsBytesThatAreNotADocument() {
-        assertThrows(IOException.class, () -> service.redact(new byte[] {1, 2, 3, 4}));
+    void rejectsInputThatIsNotADocument() {
+        assertThrows(IOException.class, () -> service.redact(new ByteArrayInputStream(new byte[] {1, 2, 3, 4})));
+        assertThrows(IOException.class, () -> service.redact(new ByteArrayInputStream(new byte[0])));
     }
 }

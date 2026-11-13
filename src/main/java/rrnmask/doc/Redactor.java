@@ -5,11 +5,14 @@ import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.Rectangle;
 import java.awt.image.BufferedImage;
+import java.io.BufferedInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.io.IOUtils;
+import org.apache.pdfbox.io.RandomAccessReadBuffer;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.ImageType;
 import org.apache.pdfbox.rendering.PDFRenderer;
@@ -19,8 +22,11 @@ import rrnmask.ocr.OcrEngine;
 import rrnmask.ocr.TextLine;
 
 /**
- * Image or PDF bytes in, one masked raster per page out. Everything stays in memory: PDFBox runs on a
- * memory-only stream cache and nothing is written to disk.
+ * Image or PDF in, one masked raster per page out, handed over page by page so only one page's rasters are
+ * alive at a time. Everything stays in memory: ImageIO and PDFBox run on memory-only caches.
+ *
+ * <p>The input stream is read to the end but not fully streamed: PDF needs random access and multi-page TIFF
+ * a frame index, so both are buffered in memory. Bound upload size before calling.
  *
  * <p>Output is always a raster with solid black boxes. Drawing over a PDF would leave the text layer readable.
  */
@@ -38,6 +44,14 @@ public final class Redactor {
     public record Page(int number, BufferedImage image, BufferedImage masked, List<TextLine> lines,
                        List<Finding> findings, Timings timings) {}
 
+    /** Receives each page as soon as it is masked; the page's rasters are dropped after it returns. */
+    public interface PageHandler {
+        void accept(Page page) throws IOException;
+    }
+
+    /** Enough to see the PDF signature and a JPEG's EXIF segment (APP1 is at most 64 KiB). */
+    private static final int HEAD = 128 * 1024;
+
     private final Options options;
     private final RrnFinder finder = new RrnFinder();
 
@@ -45,24 +59,26 @@ public final class Redactor {
         this.options = options;
     }
 
-    public List<Page> redact(byte[] bytes) throws IOException, OrtException {
-        return isPdf(bytes) ? redactPdf(bytes) : redactImages(bytes);
-    }
-
-    private List<Page> redactImages(byte[] bytes) throws IOException, OrtException {
-        long t0 = System.nanoTime();
-        List<BufferedImage> images = PageImages.read(bytes);
-        long decode = millisSince(t0) / Math.max(1, images.size());
-        List<Page> pages = new ArrayList<>();
-        for (int i = 0; i < images.size(); i++) {
-            pages.add(process(i + 1, images.get(i), List.of(), decode, 0));
+    /** Does not close {@code document}. */
+    public void redact(InputStream document, PageHandler handler) throws IOException, OrtException {
+        BufferedInputStream in = new BufferedInputStream(document, HEAD);
+        in.mark(HEAD);
+        byte[] head = in.readNBytes(HEAD);
+        in.reset();
+        if (head.length == 0) {
+            throw new IOException("empty document");
         }
-        return pages;
+        if (isPdf(head)) {
+            redactPdf(in, handler);
+        } else {
+            PageImages.read(in, ExifOrientation.read(head),
+                    (number, image, decode) -> handler.accept(process(number, image, List.of(), decode, 0)));
+        }
     }
 
-    private List<Page> redactPdf(byte[] bytes) throws IOException, OrtException {
-        List<Page> pages = new ArrayList<>();
-        try (PDDocument doc = Loader.loadPDF(bytes, "", null, null, IOUtils.createMemoryOnlyStreamCache())) {
+    private void redactPdf(InputStream in, PageHandler handler) throws IOException, OrtException {
+        try (PDDocument doc = Loader.loadPDF(new RandomAccessReadBuffer(in), "", null, null,
+                IOUtils.createMemoryOnlyStreamCache())) {
             PDFRenderer renderer = new PDFRenderer(doc);
             for (int i = 0; i < doc.getNumberOfPages(); i++) {
                 long t0 = System.nanoTime();
@@ -75,10 +91,9 @@ public final class Redactor {
                     textLayer = PdfTextLayer.extract(doc, i + 1, options.dpi() / 72f);
                     pdfText = millisSince(t0);
                 }
-                pages.add(process(i + 1, image, textLayer, render, pdfText));
+                handler.accept(process(i + 1, image, textLayer, render, pdfText));
             }
         }
-        return pages;
     }
 
     private Page process(int number, BufferedImage image, List<TextLine> textLayer, long render, long pdfText)

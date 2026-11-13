@@ -2,9 +2,12 @@ package rrnmask.doc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import ai.onnxruntime.OrtException;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import javax.imageio.ImageIO;
@@ -72,8 +75,11 @@ class ExifOrientationTest {
     }
 
     @Test
-    void rotatedPhotoIsDecodedUpright() throws IOException {
-        List<BufferedImage> pages = PageImages.read(jpegWithOrientation(80, 40, 6, false));
+    void rotatedPhotoIsDecodedUpright() throws IOException, OrtException {
+        List<BufferedImage> pages = new ArrayList<>();
+        new Redactor(new Redactor.Options(200, null, false))
+                .redact(new ByteArrayInputStream(jpegWithOrientation(80, 40, 6, false)), p -> pages.add(p.image()));
+        assertEquals(1, pages.size());
         assertEquals(40, pages.getFirst().getWidth());
         assertEquals(80, pages.getFirst().getHeight());
     }

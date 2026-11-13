@@ -1,13 +1,12 @@
 package rrnmask.doc;
 
+import ai.onnxruntime.OrtException;
 import java.awt.Graphics2D;
 import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.util.ArrayList;
+import java.io.InputStream;
 import java.util.Iterator;
-import java.util.List;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
@@ -15,35 +14,45 @@ import javax.imageio.stream.MemoryCacheImageInputStream;
 import rrnmask.ocr.Images;
 
 /**
- * Decodes raster uploads (PNG, JPEG, BMP, GIF, multi-page TIFF) into upright RGB pages, in memory only:
- * {@code ImageIO.createImageInputStream(InputStream)} would spill the upload to a temp file while ImageIO's
- * cache is on (the default).
+ * Decodes raster uploads (PNG, JPEG, BMP, GIF, multi-page TIFF) into upright RGB pages, one at a time and in
+ * memory only: {@code ImageIO.createImageInputStream(InputStream)} would spill the upload to a temp file while
+ * ImageIO's cache is on (the default).
  */
 final class PageImages {
     private PageImages() {}
 
-    static List<BufferedImage> read(byte[] bytes) throws IOException {
-        List<BufferedImage> pages = new ArrayList<>();
-        try (ImageInputStream in = new MemoryCacheImageInputStream(new ByteArrayInputStream(bytes))) {
-            Iterator<ImageReader> readers = ImageIO.getImageReaders(in);
+    interface Frames {
+        void accept(int number, BufferedImage page, long decodeMillis) throws IOException, OrtException;
+    }
+
+    /**
+     * Hands each frame to {@code frames} as soon as it is decoded; the previous frame is no longer referenced.
+     * Does not close {@code in}.
+     *
+     * @param orientation EXIF orientation, applied when the image has a single frame
+     */
+    static void read(InputStream in, int orientation, Frames frames) throws IOException, OrtException {
+        try (ImageInputStream iis = new MemoryCacheImageInputStream(in)) {
+            Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
             if (!readers.hasNext()) {
                 throw new IOException("unsupported image format");
             }
             ImageReader reader = readers.next();
             try {
-                reader.setInput(in);
+                reader.setInput(iis);
                 int n = reader.getNumImages(true);
                 for (int i = 0; i < n; i++) {
-                    pages.add(Images.toRgb(reader.read(i)));
+                    long t0 = System.nanoTime();
+                    BufferedImage page = Images.toRgb(reader.read(i));
+                    if (n == 1) {
+                        page = orient(page, orientation);
+                    }
+                    frames.accept(i + 1, page, (System.nanoTime() - t0) / 1_000_000);
                 }
             } finally {
                 reader.dispose();
             }
         }
-        if (pages.size() == 1) {
-            pages.set(0, orient(pages.getFirst(), ExifOrientation.read(bytes)));
-        }
-        return pages;
     }
 
     /** Applies EXIF orientation 2–8 so the page is stored the way a viewer shows it. */

@@ -9,6 +9,7 @@ import java.awt.Graphics2D;
 import java.awt.Rectangle;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -76,33 +77,35 @@ public final class Bench {
                 Agg agg = groups.computeIfAbsent(group, k -> new Agg());
                 agg.files++;
                 Path dir = out.resolve(det).resolve(input.toString().replaceAll("[/\\\\:]", "_"));
-                List<Page> pages;
+                Files.createDirectories(dir);
+                long[] counts = new long[3];  // pages, masks, nanos spent writing bench output
                 long t0 = System.nanoTime();
-                try {
-                    pages = redactor.redact(Files.readAllBytes(input));
+                try (InputStream in = Files.newInputStream(input)) {
+                    redactor.redact(in, page -> {
+                        Evaluator.PageEval eval = truth == null ? null : Evaluator.evaluate(
+                                truth.page(page.number()), page.image().getWidth(), page.image().getHeight(),
+                                page.findings());
+                        accumulate(agg, page, eval);
+                        records.add(record(det, input, group, page, eval));
+                        String stem = String.format(Locale.ROOT, "page-%03d", page.number());
+                        long w0 = System.nanoTime();
+                        ImageIO.write(page.masked(), "png", dir.resolve(stem + ".png").toFile());
+                        if (debug) {
+                            ImageIO.write(debugImage(page, eval), "png", dir.resolve(stem + ".debug.png").toFile());
+                            Files.writeString(dir.resolve(stem + ".txt"), dump(page.lines()));
+                        }
+                        counts[0]++;
+                        counts[1] += page.findings().size();
+                        counts[2] += System.nanoTime() - w0;
+                    });
                 } catch (Exception e) {
                     agg.errors++;
                     System.err.println("error " + input + ": " + e);
                     records.add(Map.of("det", det, "file", input.toString(), "error", e.toString()));
                     continue;
                 }
-                agg.wall += (System.nanoTime() - t0) / 1_000_000;
-                Files.createDirectories(dir);
-                for (Page page : pages) {
-                    Evaluator.PageEval eval = truth == null ? null : Evaluator.evaluate(
-                            truth.page(page.number()), page.image().getWidth(), page.image().getHeight(),
-                            page.findings());
-                    accumulate(agg, page, eval);
-                    records.add(record(det, input, group, page, eval));
-                    String stem = String.format(Locale.ROOT, "page-%03d", page.number());
-                    ImageIO.write(page.masked(), "png", dir.resolve(stem + ".png").toFile());
-                    if (debug) {
-                        ImageIO.write(debugImage(page, eval), "png", dir.resolve(stem + ".debug.png").toFile());
-                        Files.writeString(dir.resolve(stem + ".txt"), dump(page.lines()));
-                    }
-                }
-                System.err.printf(Locale.ROOT, "%-9s %s: %d page(s), %d mask(s)%n", det, input, pages.size(),
-                        pages.stream().mapToInt(p -> p.findings().size()).sum());
+                agg.wall += (System.nanoTime() - t0 - counts[2]) / 1_000_000;
+                System.err.printf(Locale.ROOT, "%-9s %s: %d page(s), %d mask(s)%n", det, input, counts[0], counts[1]);
             }
             if (engine != null) {
                 engine.close();

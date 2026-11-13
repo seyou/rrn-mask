@@ -3,6 +3,7 @@ package rrnmask;
 import ai.onnxruntime.OrtException;
 import java.awt.Rectangle;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -16,19 +17,26 @@ import rrnmask.ocr.Images;
 import rrnmask.ocr.OcrEngine;
 
 /**
- * Masks the back seven digits of resident registration numbers in an image or PDF held in memory and returns
- * the masked pages as encoded image bytes. Nothing touches disk: input is decoded from the byte array, PDFs are
- * parsed on a memory-only cache, and output is encoded into byte arrays.
+ * Masks the back seven digits of resident registration numbers in an image or PDF read from an
+ * {@link InputStream} and hands back each masked page as encoded image bytes. Nothing touches disk.
  *
  * <pre>{@code
- * try (RrnMaskService service = new RrnMaskService(RrnMaskService.Options.builder(Path.of("models")).build())) {
- *     RrnMaskService.Result result = service.redact(uploadBytes);                    // v6-tiny
- *     RrnMaskService.Result other = service.redact(uploadBytes, Detector.V6_SMALL);  // per call
- *     for (RrnMaskService.MaskedPage page : result.pages()) {
- *         store(page.image(), page.contentType());
- *     }
+ * RrnMaskService service = new RrnMaskService(RrnMaskService.Options.builder(Path.of("models")).build());
+ *
+ * // Streaming: each page goes to the sink as soon as it is masked; only one page's rasters are in memory.
+ * try (InputStream upload = multipartFile.getInputStream()) {
+ *     service.redact(upload, page -> storage.put(page.pageNumber(), page.image(), page.contentType()));
+ * }
+ *
+ * // Small documents: collect every page; the detector can be chosen per call.
+ * try (InputStream upload = multipartFile.getInputStream()) {
+ *     RrnMaskService.Result result = service.redact(upload, Detector.V6_SMALL);
  * }
  * }</pre>
+ *
+ * <p>The input is not consumed incrementally: PDFs need random access and multi-page TIFFs a frame index, so the
+ * upload is buffered in memory while it is processed. Limit upload size before calling. Streams are never closed
+ * here; the caller owns them.
  *
  * <p>Thread-safe; build one instance and share it. Each detector's ONNX sessions load once: the default
  * detector at construction, others on first use. Masks are a proposal: OCR can miss a number, so a person
@@ -67,6 +75,15 @@ public final class RrnMaskService implements AutoCloseable {
         public int maskCount() {
             return pages.stream().mapToInt(p -> p.masks().size()).sum();
         }
+    }
+
+    /** What a streaming call processed; the pages themselves went to the {@link PageSink}. */
+    public record Summary(Detector detector, int pages, int masks) {}
+
+    /** Receives masked pages in page order, one at a time. An exception stops processing and propagates. */
+    @FunctionalInterface
+    public interface PageSink {
+        void accept(MaskedPage page) throws IOException;
     }
 
     /** Settings fixed for the life of the service. Only the detector can also be chosen per call. */
@@ -220,42 +237,54 @@ public final class RrnMaskService implements AutoCloseable {
         return options;
     }
 
-    /** Masks {@code document} (PDF, PNG, JPEG, BMP, GIF or TIFF bytes) with the default detector. */
-    public Result redact(byte[] document) throws IOException {
+    /** Masks {@code document} with the default detector and returns every page. */
+    public Result redact(InputStream document) throws IOException {
         return redact(document, options.detector());
     }
 
+    /** Masks {@code document} with {@code detector} and returns every page. */
+    public Result redact(InputStream document, Detector detector) throws IOException {
+        List<MaskedPage> pages = new ArrayList<>();
+        redact(document, detector, pages::add);
+        return new Result(detector, List.copyOf(pages));
+    }
+
+    /** Masks {@code document} with the default detector, handing each page to {@code sink} as it is done. */
+    public Summary redact(InputStream document, PageSink sink) throws IOException {
+        return redact(document, options.detector(), sink);
+    }
+
     /**
-     * Masks {@code document} with {@code detector}; its models load on first use and stay loaded.
+     * Masks {@code document} (PDF, PNG, JPEG, BMP, GIF or TIFF) with {@code detector}, handing each page to
+     * {@code sink} as soon as it is masked and encoded. The detector's models load on first use and stay loaded.
      *
-     * @throws IOException when the bytes are not a readable image or PDF, or the detector's model is missing
+     * @throws IOException when the input is empty or not a readable image or PDF, the detector's model is
+     *                     missing, or {@code sink} fails
      */
-    public Result redact(byte[] document, Detector detector) throws IOException {
+    public Summary redact(InputStream document, Detector detector, PageSink sink) throws IOException {
         Objects.requireNonNull(document, "document");
         Objects.requireNonNull(detector, "detector");
-        if (document.length == 0) {
-            throw new IOException("empty document");
-        }
+        Objects.requireNonNull(sink, "sink");
         Redactor redactor = new Redactor(new Redactor.Options(options.dpi(), engine(detector),
                 options.pdfTextLayer()));
-        List<Redactor.Page> pages;
+        int[] counts = new int[2];  // pages, masks
         try {
-            pages = redactor.redact(document);
+            redactor.redact(document, page -> {
+                List<Mask> masks = new ArrayList<>(page.findings().size());
+                for (Finding f : page.findings()) {
+                    Rectangle r = f.mask();
+                    masks.add(new Mask(r.x, r.y, r.width, r.height, f.kind().name()));
+                }
+                byte[] image = Images.encode(page.masked(), options.format().imageIoName, options.jpegQuality());
+                sink.accept(new MaskedPage(page.number(), page.masked().getWidth(), page.masked().getHeight(),
+                        image, options.format().contentType(), List.copyOf(masks)));
+                counts[0]++;
+                counts[1] += masks.size();
+            });
         } catch (OrtException e) {
             throw new IllegalStateException("OCR inference failed", e);
         }
-        List<MaskedPage> out = new ArrayList<>(pages.size());
-        for (Redactor.Page page : pages) {
-            List<Mask> masks = new ArrayList<>(page.findings().size());
-            for (Finding f : page.findings()) {
-                Rectangle r = f.mask();
-                masks.add(new Mask(r.x, r.y, r.width, r.height, f.kind().name()));
-            }
-            byte[] image = Images.encode(page.masked(), options.format().imageIoName, options.jpegQuality());
-            out.add(new MaskedPage(page.number(), page.masked().getWidth(), page.masked().getHeight(), image,
-                    options.format().contentType(), List.copyOf(masks)));
-        }
-        return new Result(detector, List.copyOf(out));
+        return new Summary(detector, counts[0], counts[1]);
     }
 
     private OcrEngine engine(Detector detector) throws IOException {
