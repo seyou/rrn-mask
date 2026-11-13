@@ -8,8 +8,8 @@ public final class Main {
 
             rrnmask bench --out DIR [options] INPUT...
               INPUT              files or directories (pdf png jpg jpeg tif tiff bmp gif)
-              --det LIST         comma-separated detectors: v5-mobile (default), v5-server,
-                                 v6-tiny, v6-small, v6-medium
+              --det LIST         comma-separated detectors: v6-tiny (default), v6-small,
+                                 v6-medium, v5-mobile, v5-server
               --sources LIST     ocr,pdftext (default both); pdftext = embedded PDF text layer
               --models DIR       ONNX models (default: models; fetch with scripts/fetch-models.sh)
               --dpi N            PDF render resolution (default 200)

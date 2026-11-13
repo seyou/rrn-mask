@@ -3,9 +3,40 @@ package rrnmask.ocr;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import javax.imageio.IIOImage;
+import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.MemoryCacheImageOutputStream;
 
 public final class Images {
     private Images() {}
+
+    /**
+     * Encodes to bytes without touching disk. {@code ImageIO.write(img, fmt, OutputStream)} would buffer through
+     * a temp file when ImageIO's cache is on (the default); the memory cache stream avoids that.
+     *
+     * @param format  ImageIO format name, e.g. {@code "png"} or {@code "jpeg"}
+     * @param quality 0..1 compression quality for lossy formats; ignored for PNG
+     */
+    public static byte[] encode(BufferedImage img, String format, float quality) throws IOException {
+        ImageWriter writer = ImageIO.getImageWritersByFormatName(format).next();
+        ImageWriteParam param = writer.getDefaultWriteParam();
+        if (param.canWriteCompressed() && !format.equalsIgnoreCase("png")) {
+            param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+            param.setCompressionQuality(quality);
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (MemoryCacheImageOutputStream ios = new MemoryCacheImageOutputStream(out)) {
+            writer.setOutput(ios);
+            writer.write(null, new IIOImage(img, null, null), param);
+        } finally {
+            writer.dispose();
+        }
+        return out.toByteArray();
+    }
 
     public static BufferedImage toRgb(BufferedImage src) {
         if (src.getType() == BufferedImage.TYPE_INT_RGB) {

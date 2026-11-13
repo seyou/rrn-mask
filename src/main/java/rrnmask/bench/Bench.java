@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.stream.Stream;
 import javax.imageio.ImageIO;
+import rrnmask.Detector;
 import rrnmask.doc.Redactor;
 import rrnmask.doc.Redactor.Page;
 import rrnmask.find.RrnFinder.Finding;
@@ -28,15 +29,6 @@ import rrnmask.ocr.TextLine;
 
 /** Runs the redactor over a set of documents, per detector model, and scores it against truth files. */
 public final class Bench {
-    static final Map<String, String> DETECTORS = new LinkedHashMap<>();
-    static {
-        DETECTORS.put("v5-mobile", "ch_PP-OCRv5_det_mobile.onnx");
-        DETECTORS.put("v5-server", "ch_PP-OCRv5_det_server.onnx");
-        DETECTORS.put("v6-tiny", "PP-OCRv6_det_tiny.onnx");
-        DETECTORS.put("v6-small", "PP-OCRv6_det_small.onnx");
-        DETECTORS.put("v6-medium", "PP-OCRv6_det_medium.onnx");
-    }
-    static final String RECOGNIZER = "korean_PP-OCRv5_rec_mobile.onnx";
     private static final Set<String> EXTENSIONS = Set.of("pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif");
     private static final ObjectMapper JSON = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
 
@@ -63,18 +55,17 @@ public final class Bench {
         if (inputs.isEmpty()) {
             throw new IllegalArgumentException("no input documents (" + String.join(", ", EXTENSIONS) + ")");
         }
-        List<String> dets = sources.contains("ocr") ? List.of(a.get("det", "v5-mobile").split(",")) : List.of("none");
+        List<String> dets = sources.contains("ocr") ? List.of(a.get("det", Detector.V6_TINY.id()).split(","))
+                : List.of("none");
 
         Map<String, Map<String, Agg>> summary = new LinkedHashMap<>();
         List<Map<String, Object>> records = new ArrayList<>();
         for (String det : dets) {
             OcrEngine engine = null;
             if (!det.equals("none")) {
-                String file = DETECTORS.get(det);
-                if (file == null) {
-                    throw new IllegalArgumentException("unknown --det " + det + "; one of " + DETECTORS.keySet());
-                }
-                engine = new OcrEngine(models.resolve(file), models.resolve(RECOGNIZER), threads, maxSide);
+                Detector d = Detector.fromId(det);
+                engine = new OcrEngine(models.resolve(d.modelFile()), models.resolve(Detector.RECOGNIZER), threads,
+                        maxSide);
                 warmUp(engine);
             }
             Redactor redactor = new Redactor(new Redactor.Options(dpi, engine, sources.contains("pdftext")));
@@ -120,7 +111,7 @@ public final class Bench {
 
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("config", Map.of("dpi", dpi, "detMaxSide", maxSide, "threads", threads,
-                "sources", String.join(",", sources), "recognizer", RECOGNIZER));
+                "sources", String.join(",", sources), "recognizer", Detector.RECOGNIZER));
         report.put("summary", summaryJson(summary));
         report.put("pages", records);
         Files.createDirectories(out);

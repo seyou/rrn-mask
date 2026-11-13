@@ -24,11 +24,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Random;
 import java.util.Set;
-import javax.imageio.IIOImage;
-import javax.imageio.ImageIO;
-import javax.imageio.ImageWriteParam;
-import javax.imageio.ImageWriter;
-import javax.imageio.stream.MemoryCacheImageOutputStream;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
@@ -500,24 +495,11 @@ public final class SynthGen {
     }
 
     private static byte[] png(BufferedImage img) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        ImageIO.write(img, "png", out);
-        return out.toByteArray();
+        return Images.encode(img, "png", 1f);
     }
 
     private static byte[] jpeg(BufferedImage img, float quality) throws IOException {
-        ImageWriter writer = ImageIO.getImageWritersByFormatName("jpeg").next();
-        ImageWriteParam param = writer.getDefaultWriteParam();
-        param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-        param.setCompressionQuality(quality);
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        try (MemoryCacheImageOutputStream ios = new MemoryCacheImageOutputStream(out)) {
-            writer.setOutput(ios);
-            writer.write(null, new IIOImage(img, null, null), param);
-        } finally {
-            writer.dispose();
-        }
-        return out.toByteArray();
+        return Images.encode(img, "jpeg", quality);
     }
 
     private static String personName(Random r) {

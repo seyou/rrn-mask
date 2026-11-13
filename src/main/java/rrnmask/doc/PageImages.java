@@ -11,15 +11,20 @@ import java.util.List;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
+import javax.imageio.stream.MemoryCacheImageInputStream;
 import rrnmask.ocr.Images;
 
-/** Decodes raster uploads (PNG, JPEG, BMP, GIF, multi-page TIFF) into upright RGB pages. */
+/**
+ * Decodes raster uploads (PNG, JPEG, BMP, GIF, multi-page TIFF) into upright RGB pages, in memory only:
+ * {@code ImageIO.createImageInputStream(InputStream)} would spill the upload to a temp file while ImageIO's
+ * cache is on (the default).
+ */
 final class PageImages {
     private PageImages() {}
 
     static List<BufferedImage> read(byte[] bytes) throws IOException {
         List<BufferedImage> pages = new ArrayList<>();
-        try (ImageInputStream in = ImageIO.createImageInputStream(new ByteArrayInputStream(bytes))) {
+        try (ImageInputStream in = new MemoryCacheImageInputStream(new ByteArrayInputStream(bytes))) {
             Iterator<ImageReader> readers = ImageIO.getImageReaders(in);
             if (!readers.hasNext()) {
                 throw new IOException("unsupported image format");
