@@ -107,6 +107,88 @@ class RrnFinderTest {
     }
 
     @Test
+    void leavesConventionallyMaskedNumbersAlone() {
+        List<TextLine> lines = List.of(
+                line(0, 0, "900101-*******"),
+                line(0, 40, "900101-1XXXXXX"),
+                line(0, 80, "900101-1●●●●●●"),
+                line(0, 120, "******-*******"),
+                line(0, 160, "90010112*****"));  // partly masked but no hyphen: too loose to call
+        assertTrue(finder.find(lines).isEmpty());
+    }
+
+    @Test
+    void masksABackLeftReadableBehindAMaskedFront() {
+        for (String s : List.of("******-1234567", "9001**-1234567", "XXXXXX-1234567")) {
+            List<Finding> found = finder.find(List.of(line(0, 0, s)));
+            assertEquals(1, found.size(), s);
+            Rectangle m = found.getFirst().mask();
+            assertTrue(m.x >= 60 && m.x <= 70 && m.getMaxX() >= 140, s + " → " + m);
+        }
+    }
+
+    @Test
+    void masksTheWholeBackWhenTheDocumentMaskedOnlyPartOfIt() {
+        List<Finding> found = finder.find(List.of(line(0, 0, "900101-12*****")));
+        assertEquals(1, found.size());
+        Rectangle m = found.getFirst().mask();
+        assertTrue(m.x >= 60 && m.x <= 70 && m.getMaxX() >= 140, "all seven back positions: " + m);
+    }
+
+    @Test
+    void masksABackCellNextToAMaskedFrontCell() {
+        TextLine back = line(180, 0, "1234567");
+        List<Finding> found = finder.find(List.of(line(0, 0, "******"), back));
+        assertEquals(1, found.size());
+        assertTrue(found.getFirst().mask().intersects(back.box()));
+    }
+
+    @Test
+    void toleratesOcrMiscountingAsterisks() {
+        // "14*****" read with four stars, "10*****" with one; the front "******" read as five stars or one.
+        for (String s : List.of("890618-14****", "620313-10*", "*****_2061087", "∗∗∗∗∗∗-1680236")) {
+            assertEquals(1, finder.find(List.of(line(0, 0, s))).size(), s);
+        }
+        TextLine back = line(40, 0, "2870289");
+        List<Finding> found = finder.find(List.of(line(0, 0, "*"), back));
+        assertEquals(1, found.size());
+        assertTrue(found.getFirst().mask().intersects(back.box()));
+    }
+
+    @Test
+    void masksABackWhoseMaskedFrontWasNotDetected() {
+        assertEquals(1, finder.find(List.of(line(0, 0, "-1211851"))).size());
+        TextLine header = line(100, 0, "주민등록번호");
+        TextLine cell = line(100, 40, "2411563");
+        assertEquals(1, finder.find(List.of(header, cell)).size());
+        // Without a registration header, a bare seven-digit number is just a number.
+        assertTrue(finder.find(List.of(line(100, 40, "2411563"))).isEmpty());
+        // Hyphens after digits are phone numbers and ranges, not a lone back.
+        assertTrue(finder.find(List.of(line(0, 0, "02-1234567"), line(0, 40, "2026-1234567"))).isEmpty());
+    }
+
+    @Test
+    void neighbouringRowsWithOverlappingBoxesAreBothMasked() {
+        // On a skewed scan, axis-aligned boxes of consecutive rows overlap vertically.
+        List<Finding> found = finder.find(List.of(line(0, 0, "900101-1234567"), line(0, 15, "800101-2234567")));
+        assertEquals(2, found.size());
+    }
+
+    @Test
+    void backOnlyCellSittingRightOfAShortHeaderIsStillInTheColumn() {
+        // "******-2411563" with the stars undetected: the back starts where the header ends.
+        TextLine header = line(100, 0, "등록번호");
+        TextLine back = line(140, 40, "2411563");
+        assertEquals(1, finder.find(List.of(header, back)).size());
+    }
+
+    @Test
+    void maskedBackRunIntoTheNextNumberIsNotAMaskedFront() {
+        // OCR merged "900101-1******" with the share count "1500000" beside it.
+        assertTrue(finder.find(List.of(line(0, 0, "900101-1******1500000"))).isEmpty());
+    }
+
+    @Test
     void columnFallbackMasksGarbledNumbersUnderARegistrationHeader() {
         TextLine header = line(100, 0, "주민등록번호");
         TextLine cell = line(100, 40, "9001011234");  // OCR dropped three digits

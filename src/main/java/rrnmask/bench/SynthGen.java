@@ -37,8 +37,10 @@ import rrnmask.ocr.Images;
 
 /**
  * Fake shareholder registers with known number positions. Templates vary columns, header wording, number
- * formatting (hyphen, spaced, none, already masked, front/back in separate columns), fonts, sizes and grid
- * lines, and include distractors (business number, phone, dates, share counts). Five renderings per seed:
+ * formatting (hyphen, spaced, none, front/back in separate columns), numbers the author already masked
+ * (conventionally — "1******", "*******", "1XXXXXX" — or leaving digits exposed: "******-1234567",
+ * "9001**-1234567", "900101-12*****"), fonts, sizes and grid lines, and include distractors (business number,
+ * phone, dates, share counts). Five renderings per seed:
  * clean PNG, scan-like JPEG (skew, blur, noise, compression), hard JPEG (more skew, half resolution, uneven
  * light, heavy compression), vector PDF with a text layer, and an image-only PDF of the scan.
  * All numbers are random; none belong to anyone.
@@ -239,23 +241,58 @@ public final class SynthGen {
             boolean corp = r.nextFloat() < 0.2f;
             String name = corp ? pick(r, CORP_HOLDERS) : personName(r);
             String[] num = corp ? corpNumber(r) : residentNumber(r);
-            boolean masked = !corp && r.nextFloat() < 0.1f;
-            String back = masked ? num[1].charAt(0) + "******" : num[1];
+            String front = num[0];
+            String back = num[1];
+            String rowSep = sep;
+            Role backRole = corp ? Role.OPTIONAL : Role.TARGET;
+            boolean keepFront = true;
+            int exposed = 7;
+            switch (corp ? PreMask.NONE : PreMask.pick(r)) {
+                case NONE -> { }
+                case GENDER_ONLY -> {
+                    back = back.charAt(0) + "******";
+                    backRole = Role.OPTIONAL;
+                }
+                case ALL_STARS -> {
+                    back = "*******";
+                    backRole = Role.OPTIONAL;
+                }
+                case X_LETTERS -> {
+                    back = back.charAt(0) + "XXXXXX";
+                    backRole = Role.OPTIONAL;
+                }
+                case FRONT_STARS -> {
+                    front = "******";
+                    rowSep = "-";
+                    keepFront = false;
+                }
+                case FRONT_PARTIAL -> {
+                    front = front.substring(0, 4) + "**";
+                    rowSep = "-";
+                    keepFront = false;
+                }
+                case BACK_PARTIAL -> {
+                    back = back.substring(0, 2) + "*****";
+                    rowSep = "-";
+                    exposed = 2;
+                }
+            }
+            int keep = keepFront ? 5 : -1;
             String shares = String.format(Locale.ROOT, "%,d", 100 + r.nextInt(2_000_000));
             Run[] row = switch (variant) {
                 case 0 -> new Run[] {cell(Integer.toString(i + 1)), cell(name),
-                        numberCell(num[0] + sep + back, 6, num[0].length() + sep.length(), masked, corp),
+                        numberCell(front + rowSep + back, keep, front.length() + rowSep.length(), backRole, exposed),
                         cell(pick(r, ADDRESSES)), cell(shares),
                         cell(String.format(Locale.ROOT, "%.2f%%", r.nextFloat() * 40))};
                 case 1 -> new Run[] {cell(Integer.toString(i + 1)), cell(name),
-                        numberCell(num[0] + sep + back, 6, num[0].length() + sep.length(), masked, corp),
+                        numberCell(front + rowSep + back, keep, front.length() + rowSep.length(), backRole, exposed),
                         cell(r.nextFloat() < 0.8f ? "보통주" : "우선주"), cell(shares),
                         cell(String.format(Locale.ROOT, "20%02d-%02d-%02d", r.nextInt(26), 1 + r.nextInt(12),
                                 1 + r.nextInt(28))),
                         cell(r.nextFloat() < 0.15f ? "대표이사" : "")};
                 default -> new Run[] {cell(Integer.toString(i + 1)), cell(name),
-                        new Run(num[0], 0, 0, 0, List.of(new Span(5, 6, Role.KEEP))),
-                        numberCell(back, 0, 0, masked, corp), cell(pick(r, ADDRESSES)), cell(shares)};
+                        new Run(front, 0, 0, 0, keepFront ? List.of(new Span(5, 6, Role.KEEP)) : List.of()),
+                        numberCell(back, -1, 0, backRole, exposed), cell(pick(r, ADDRESSES)), cell(shares)};
             };
             cells.add(row);
         }
@@ -322,18 +359,36 @@ public final class SynthGen {
     }
 
     /**
-     * Back seven digits are a target (optional for corporate numbers); an already masked number is neither.
-     * The front digit just before {@code frontEnd} must stay visible ({@code frontEnd} 0: front in another cell).
+     * @param keep      index of the 6th front digit, which must stay visible; -1 when it is not in this cell or
+     *                  was masked by the document
+     * @param backStart where the seven back characters start
+     * @param backRole  TARGET when digits there are exposed, OPTIONAL for corporate or already-masked numbers
+     * @param exposed   how many leading back characters are digits; the masked rest ("*****") is OPTIONAL, since
+     *                  covering asterisks hides nothing
      */
-    private static Run numberCell(String text, int frontEnd, int backStart, boolean masked, boolean corp) {
+    private static Run numberCell(String text, int keep, int backStart, Role backRole, int exposed) {
         List<Span> spans = new ArrayList<>();
-        if (frontEnd > 0) {
-            spans.add(new Span(frontEnd - 1, frontEnd, Role.KEEP));
+        if (keep >= 0) {
+            spans.add(new Span(keep, keep + 1, Role.KEEP));
         }
-        if (!masked) {
-            spans.add(new Span(backStart, backStart + 7, corp ? Role.OPTIONAL : Role.TARGET));
+        spans.add(new Span(backStart, backStart + exposed, backRole));
+        if (exposed < 7) {
+            spans.add(new Span(backStart + exposed, backStart + 7, Role.OPTIONAL));
         }
         return new Run(text, 0, 0, 0, spans);
+    }
+
+    /** How the document's author already masked a resident number, if at all. */
+    private enum PreMask {
+        NONE, GENDER_ONLY, ALL_STARS, X_LETTERS, FRONT_STARS, FRONT_PARTIAL, BACK_PARTIAL;
+
+        /** 75% unmasked; the rest spread evenly over the six styles. */
+        static PreMask pick(Random r) {
+            if (r.nextFloat() < 0.75f) {
+                return NONE;
+            }
+            return values()[1 + r.nextInt(values().length - 1)];
+        }
     }
 
     private static float[] columnWidths(Font font, String[] headers, List<Run[]> cells, float s, float pad) {

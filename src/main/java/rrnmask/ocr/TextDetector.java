@@ -13,8 +13,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * PP-OCR DB text detection. Pre/post-processing follows PaddleOCR 3.x defaults
- * (ImageNet normalisation on BGR, thresh 0.3, box_thresh 0.6, unclip 1.5).
+ * PP-OCR DB text detection. Pre/post-processing follows PaddleOCR 3.x defaults (ImageNet normalisation on
+ * BGR, thresh 0.3, unclip 1.5) except box_thresh 0.5 instead of 0.6, RapidOCR's value: faint text (light scans,
+ * runs of asterisks) scores lower, and on the synthetic set 0.5 found more numbers with no new false masks.
  * Boxes are axis-aligned: connected components of the probability bitmap stand in for cv2 contours,
  * which is exact for upright documents and loose for skewed ones.
  */
@@ -22,7 +23,7 @@ final class TextDetector {
     private static final float[] MEAN = {0.485f, 0.456f, 0.406f};
     private static final float[] STD = {0.229f, 0.224f, 0.225f};
     private static final float THRESH = 0.3f;
-    private static final float BOX_THRESH = 0.6f;
+    private static final float BOX_THRESH = 0.5f;
     private static final double UNCLIP_RATIO = 1.5;
     private static final int MIN_SIDE = 64;
 

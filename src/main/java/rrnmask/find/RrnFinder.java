@@ -24,7 +24,10 @@ import rrnmask.ocr.TextLine;
  *       {@value #COLUMN_MIN_DIGITS} digits not already masked is masked after its 6th digit. Recovers numbers
  *       the OCR garbled (dropped or extra digits).</li>
  * </ol>
- * Common OCR letter/digit confusions are folded to digits before matching.
+ * Common OCR letter/digit confusions are folded to digits, and mask glyphs ({@code * ● ■ □ # X ×}) to
+ * {@code *}, before matching. Numbers the document already masks ("1******") are left alone; a number whose
+ * front was masked but back left readable ("******-1234567"), or whose back is only partly masked
+ * ("900101-12*****"), is masked.
  */
 public final class RrnFinder {
 
@@ -42,21 +45,47 @@ public final class RrnFinder {
     }
 
     static final int COLUMN_MIN_DIGITS = 10;
-    /** Front part: six digits, or five plus a hyphen (OCR dropped a front digit; the back still needs masking). */
-    private static final Pattern RRN = Pattern.compile("(?<!\\d)(\\d{6}\\s*-?|\\d{5}\\s*-)\\s*([1-8]\\d{6})(?!\\d)");
+    /**
+     * Front: six digits; five digits and a hyphen (OCR dropped one); or six digits/mask characters and a hyphen.
+     * Back: seven digits/mask characters, judged by {@link #exposedBack}. Mask characters are folded to {@code *}.
+     */
+    private static final Pattern RRN =
+            Pattern.compile("(?<![0-9*])(\\d{6}\\s*-?|\\d{5}\\s*-|[0-9*]{6}\\s*-)\\s*([0-9*]{7})(?![0-9*])");
+    /**
+     * Back partly masked by the document's author, whatever number of stars OCR reports: it miscounts runs of
+     * asterisks ("890618-14****" for "14*****", "10*" for "10*****").
+     */
+    private static final Pattern PARTIAL_BACK =
+            Pattern.compile("(?<![0-9*])(\\d{6}\\s*-)\\s*([1-8]\\d{1,5}\\*+)(?![0-9*])");
+    /**
+     * Front masked by the author, any star count, back still readable: "*****_2061087", "9001**-1234567", or a
+     * lone "*" read from "******" followed by the back in its own box. The star run must not itself follow
+     * "digit-": in "900101-1******1500000" it is a conventionally masked back run into a share count.
+     */
+    private static final Pattern MASKED_FRONT = Pattern.compile(
+            "(?<![0-9*])(?<!\\d\\s?-\\s?)([0-9]{0,5}\\*[0-9*]{0,7})\\s*-?\\s*([1-8]\\d{6})(?![0-9*])");
+    /**
+     * A hyphen and seven digits with no front at all: the detector often finds no text in a run of asterisks, so
+     * "******-1211851" comes back as "-1211851". The hyphen must not follow a digit (phone, date ranges).
+     */
+    private static final Pattern LONE_BACK =
+            Pattern.compile("(?<![0-9*])(?<![0-9*]\\s)(-)\\s*([1-8]\\d{6})(?![0-9*])");
+    private static final List<Pattern> PATTERNS = List.of(RRN, PARTIAL_BACK, MASKED_FRONT, LONE_BACK);
+    /** A cell whose only digits are seven in a row, first 1–8: the back of a number whose front is masked. */
+    private static final Pattern BACK_ONLY_CELL = Pattern.compile("[^0-9]*([1-8]\\d{6})[^0-9]*");
     private static final Pattern HEADER = Pattern.compile("주민|외국인\\s*등록|법인\\s*등록|등록\\s*번호|실명\\s*번호");
     private static final Pattern HEADER_EXCLUDE = Pattern.compile("사업자");
     /** Max horizontal gap between joined lines, in line heights. */
     private static final double JOIN_GAP = 2.5;
     /** Joined lines may overlap this much (detector boxes are padded), in line heights. */
     private static final double JOIN_OVERLAP = 1.0;
-    /** A cell ending in six digits, e.g. "960616" or a name merged into it: "강영민960616". */
-    private static final Pattern FRONT_END = Pattern.compile("(?<!\\d)(\\d{6})\\s*-?\\s*$");
+    /** A cell ending in six digits (or masked front), e.g. "960616", "******" or a name merged in: "강영민960616". */
+    private static final Pattern FRONT_END = Pattern.compile("(?<![0-9*])([0-9*]{6})\\s*-?\\s*$");
     /**
-     * Seven digits at the start of the next cell. Up to three leading characters are tolerated: when two
-     * detector boxes overlap, the recognizer repeats the shared characters ("5-2666026" after "571126").
+     * Seven digits/mask characters at the start of the next cell. Up to three leading characters are tolerated:
+     * when two detector boxes overlap, the recognizer repeats the shared characters ("5-2666026" after "571126").
      */
-    private static final Pattern BACK_FIRST = Pattern.compile("^.{0,3}?([1-8]\\d{6})(?!\\d)");
+    private static final Pattern BACK_FIRST = Pattern.compile("^.{0,3}?([1-8]\\d{1,5}\\*+|[0-9*]{7})(?![0-9*])");
     static final double SPLIT_GAP = 8;
     /** Largest gap, in line heights, between the header and the first cell of its column. */
     private static final double COLUMN_BREAK = 2.5;
@@ -91,7 +120,7 @@ public final class RrnFinder {
                 continue;
             }
             Matcher m = BACK_FIRST.matcher(fold(next.text()));
-            if (!m.find()) {
+            if (!m.find() || !exposedBack(m.group(1), true)) {
                 continue;
             }
             Rectangle mask = charRect(next, m.start(1), m.end(1) - 1);
@@ -115,26 +144,63 @@ public final class RrnFinder {
                 refs.add(new int[] {i, c});
             }
         }
-        Matcher m = RRN.matcher(text);
-        while (m.find()) {
-            Rectangle mask = null;
-            for (int k = m.start(2); k < m.end(2); k++) {
-                int[] ref = refs.get(k);
-                Rectangle r = charRect(chain.get(ref[0]), ref[1], ref[1]);
-                mask = mask == null ? r : mask.union(r);
+        for (Pattern p : PATTERNS) {
+            Matcher m = p.matcher(text);
+            while (m.find()) {
+                if (exposedBack(m.group(2), m.group(1).indexOf('-') >= 0)) {
+                    emit(m, text, refs, chain, out);
+                }
             }
-            int lastFront = m.end(1) - 1;
-            while (!isDigit(text.charAt(lastFront))) {
-                lastFront--;
-            }
+        }
+    }
+
+    /** Masks group 2 (the back) of a match; group 1 is the front, possibly just a separator. */
+    private static void emit(Matcher m, CharSequence text, List<int[]> refs, List<TextLine> chain,
+                             List<Finding> out) {
+        Rectangle mask = null;
+        for (int k = m.start(2); k < m.end(2); k++) {
+            int[] ref = refs.get(k);
+            Rectangle r = charRect(chain.get(ref[0]), ref[1], ref[1]);
+            mask = mask == null ? r : mask.union(r);
+        }
+        if (covered(mask, out)) {
+            return;  // an earlier pattern already took this number
+        }
+        int lastFront = m.end(1) - 1;
+        while (lastFront >= m.start(1) && !isFrontChar(text.charAt(lastFront))) {
+            lastFront--;
+        }
+        int[] back = refs.get(m.start(2));
+        boolean abuts = false;
+        if (lastFront >= m.start(1)) {
             int[] front = refs.get(lastFront);
-            int[] back = refs.get(m.start(2));
-            boolean abuts = front[0] == back[0] && back[1] - front[1] == 1;
+            abuts = front[0] == back[0] && back[1] - front[1] == 1;
             if (front[0] == back[0]) {
                 mask = overSeparator(mask, chain.get(back[0]), front[1], back[1]);
             }
-            out.add(new Finding(mask, Kind.PATTERN, m.group(1).replaceAll("\\D", "") + m.group(2), abuts));
         }
+        out.add(new Finding(mask, Kind.PATTERN, m.group(1).replaceAll("[^0-9*]", "") + m.group(2), abuts));
+    }
+
+    /**
+     * Whether a back part still shows something worth masking.
+     * <ul>
+     *   <li>All digits: a registration number when there are seven and the first (gender/century) digit is 1–8.</li>
+     *   <li>Partly masked by the document's author ("12*****", or "14****" as OCR may count it): two or more
+     *       digits still visible, and a hyphen before it so arbitrary digit/star runs do not qualify.</li>
+     *   <li>Conventionally masked ("1******", "*******"): nothing beyond the gender digit shows; left alone.</li>
+     * </ul>
+     */
+    static boolean exposedBack(String back, boolean separated) {
+        int digits = countDigits(back);
+        if (digits == back.length()) {
+            return digits == 7 && back.charAt(0) >= '1' && back.charAt(0) <= '8';
+        }
+        return digits >= 2 && separated;
+    }
+
+    private static boolean isFrontChar(char c) {
+        return isDigit(c) || c == '*';
     }
 
     /**
@@ -177,6 +243,13 @@ public final class RrnFinder {
                         hyphen = i;
                     }
                 }
+                Matcher backOnly = BACK_ONLY_CELL.matcher(norm);
+                if (backOnly.matches()) {
+                    // Front masked and not even detected ("******" often yields no text box): the back stands alone.
+                    Rectangle mask = charRect(cell, backOnly.start(1), backOnly.end(1) - 1);
+                    out.add(new Finding(mask, Kind.COLUMN, backOnly.group(1), false));
+                    continue;
+                }
                 if (digits < COLUMN_MIN_DIGITS) {
                     continue;
                 }
@@ -196,7 +269,9 @@ public final class RrnFinder {
     }
 
     /**
-     * Cells under {@code header}: centred within half a header width of it, stacked downward. The run stops
+     * Cells under {@code header}: centred from half a header width left of it to a full width right of it (numbers
+     * are wider than a short Hangul header, and a back whose masked front went undetected sits further right),
+     * stacked downward. The run stops
      * at the end of the table, so footer lines (phone numbers, dates) are not taken for cells:
      * <ul>
      *   <li>a vertical gap more than 2.5× the tightest row gap seen so far (plus 0.3 line heights of slack);
@@ -208,7 +283,7 @@ public final class RrnFinder {
     private static List<TextLine> column(TextLine header, List<TextLine> lines) {
         Rectangle hb = header.box();
         double lo = hb.x - hb.width * 0.5;
-        double hi = hb.getMaxX() + hb.width * 0.5;
+        double hi = hb.getMaxX() + hb.width;
         List<TextLine> below = new ArrayList<>();
         for (TextLine l : lines) {
             Rectangle b = l.box();
@@ -290,9 +365,17 @@ public final class RrnFinder {
         return new Rectangle(x0, line.box().y, x1 - x0, line.box().height);
     }
 
+    /**
+     * Whether an existing mask already accounts for {@code box}: their overlap is at least half of the smaller.
+     * Mere intersection is not enough: on skewed scans the axis-aligned boxes of neighbouring rows overlap, and a
+     * mask from the row above would otherwise suppress this row's number.
+     */
     private static boolean covered(Rectangle box, List<Finding> findings) {
+        double boxArea = (double) box.width * box.height;
         for (Finding f : findings) {
-            if (f.mask().intersects(box)) {
+            Rectangle overlap = f.mask().intersection(box);
+            if (!overlap.isEmpty() && (double) overlap.width * overlap.height
+                    >= 0.5 * Math.min(boxArea, (double) f.mask().width * f.mask().height)) {
                 return true;
             }
         }
@@ -334,6 +417,7 @@ public final class RrnFinder {
             case 'G', 'b' -> '6';
             case 'B' -> '8';
             case '–', '—', '‐', '‑', '−', '－', '~', '_', '.', '·', 'ㅡ', '一', '=' -> '-';
+            case '*', '＊', '∗', '⁎', '٭', '✱', '✲', '✳', '✶', '✻', '●', '■', '□', '#', 'x', 'X', '×', '※', '•' -> '*';
             default -> c;
         };
     }
