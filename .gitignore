@@ -1,0 +1,7 @@
+.gradle/
+build/
+models/
+fonts/
+out/
+# Real shareholder registers carry resident registration numbers. Never commit them.
+samples/
