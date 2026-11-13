@@ -95,9 +95,13 @@ public final class Redactor {
         long t0 = System.nanoTime();
         // Sources are searched separately: an OCR box and a text-layer word on the same spot would
         // otherwise interleave in one row and break the pattern.
-        List<Finding> findings = new ArrayList<>(finder.find(ocrLines));
-        findings.addAll(finder.find(textLayer));
-        findings = merge(findings);
+        List<Finding> ocrFindings = new ArrayList<>();
+        for (Finding f : finder.find(ocrLines)) {
+            // About seven digits plus the right padding: a rough pitch is enough to bound the search.
+            // Only edges abutting the front digits are snapped; a separator already gives a safe margin.
+            ocrFindings.add(f.abutsFront() ? f.withMask(EdgeSnap.snapLeft(image, f.mask(), f.mask().width / 8.0)) : f);
+        }
+        List<Finding> findings = merge(finder.find(textLayer), ocrFindings);
         long find = millisSince(t0);
         List<TextLine> lines = new ArrayList<>(ocrLines);
         lines.addAll(textLayer);
@@ -117,22 +121,45 @@ public final class Redactor {
         return out;
     }
 
-    /** Collapses overlapping boxes (same number found by OCR and by the text layer) into their union. */
-    static List<Finding> merge(List<Finding> in) {
+    /**
+     * Text-layer boxes come from the PDF's own glyph positions, so where both sources found the same number the
+     * text-layer box wins; a union would carry the OCR box's looser edge onto the front digits.
+     * Within each source, overlapping boxes collapse into their union.
+     */
+    static List<Finding> merge(List<Finding> preferred, List<Finding> others) {
+        List<Finding> out = collapse(preferred);
+        int kept = out.size();
+        for (Finding f : collapse(others)) {
+            boolean duplicate = false;
+            for (int i = 0; i < kept && !duplicate; i++) {
+                duplicate = overlaps(out.get(i).mask(), f.mask());
+            }
+            if (!duplicate) {
+                out.add(f);
+            }
+        }
+        return out;
+    }
+
+    private static List<Finding> collapse(List<Finding> in) {
         List<Finding> out = new ArrayList<>();
         outer:
         for (Finding f : in) {
             for (int i = 0; i < out.size(); i++) {
                 Finding g = out.get(i);
-                Rectangle overlap = g.mask().intersection(f.mask());
-                if (!overlap.isEmpty() && area(overlap) >= 0.3 * Math.min(area(g.mask()), area(f.mask()))) {
-                    out.set(i, new Finding(g.mask().union(f.mask()), g.kind(), g.digits()));
+                if (overlaps(g.mask(), f.mask())) {
+                    out.set(i, g.withMask(g.mask().union(f.mask())));
                     continue outer;
                 }
             }
             out.add(f);
         }
         return out;
+    }
+
+    private static boolean overlaps(Rectangle a, Rectangle b) {
+        Rectangle overlap = a.intersection(b);
+        return !overlap.isEmpty() && area(overlap) >= 0.3 * Math.min(area(a), area(b));
     }
 
     private static double area(Rectangle r) {

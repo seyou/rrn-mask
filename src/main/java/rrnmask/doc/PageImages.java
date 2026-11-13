@@ -1,9 +1,5 @@
 package rrnmask.doc;
 
-import com.drew.imaging.ImageMetadataReader;
-import com.drew.imaging.ImageProcessingException;
-import com.drew.metadata.MetadataException;
-import com.drew.metadata.exif.ExifIFD0Directory;
 import java.awt.Graphics2D;
 import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
@@ -40,22 +36,9 @@ final class PageImages {
             }
         }
         if (pages.size() == 1) {
-            pages.set(0, orient(pages.getFirst(), exifOrientation(bytes)));
+            pages.set(0, orient(pages.getFirst(), ExifOrientation.read(bytes)));
         }
         return pages;
-    }
-
-    private static int exifOrientation(byte[] bytes) {
-        try {
-            ExifIFD0Directory dir = ImageMetadataReader.readMetadata(new ByteArrayInputStream(bytes))
-                    .getFirstDirectoryOfType(ExifIFD0Directory.class);
-            if (dir != null && dir.containsTag(ExifIFD0Directory.TAG_ORIENTATION)) {
-                return dir.getInt(ExifIFD0Directory.TAG_ORIENTATION);
-            }
-        } catch (ImageProcessingException | IOException | MetadataException e) {
-            // No readable EXIF: treat as upright.
-        }
-        return 1;
     }
 
     /** Applies EXIF orientation 2–8 so the page is stored the way a viewer shows it. */

@@ -45,6 +45,8 @@ public final class Bench {
     /** Per detector × group totals. */
     private static final class Agg {
         int files, pages, evaluated, targets, covered, partial, missed, falsePositives, safePages, errors;
+        int keeps, clipped;
+        double keepCoverage;
         long render, det, rec, pdfText, find, wall;
     }
 
@@ -183,6 +185,9 @@ public final class Bench {
             agg.partial += eval.partial();
             agg.missed += eval.missed();
             agg.falsePositives += eval.falsePositives();
+            agg.keeps += eval.keeps();
+            agg.clipped += eval.clipped();
+            agg.keepCoverage += eval.keepCoverage();
             if (eval.safe()) {
                 agg.safePages++;
             }
@@ -214,6 +219,9 @@ public final class Bench {
             e.put("missed", eval.missed());
             e.put("falsePositives", eval.falsePositives());
             e.put("misses", eval.misses().stream().map(b -> List.of(b.x, b.y, b.width, b.height)).toList());
+            e.put("keeps", eval.keeps());
+            e.put("clipped", eval.clipped());
+            e.put("clips", eval.clips().stream().map(b -> List.of(b.x, b.y, b.width, b.height)).toList());
             r.put("eval", e);
         }
         return r;
@@ -221,7 +229,8 @@ public final class Bench {
 
     /**
      * Unmasked page with overlays: OCR boxes green, text-layer boxes blue, masks translucent red,
-     * missed/partial targets magenta. Shows the digits under the masks, so it holds PII.
+     * missed/partial targets magenta, clipped 6th front digits orange. Shows the digits under the masks, so it
+     * holds PII.
      */
     private static BufferedImage debugImage(Page page, Evaluator.PageEval eval) {
         BufferedImage img = new BufferedImage(page.image().getWidth(), page.image().getHeight(),
@@ -244,6 +253,10 @@ public final class Bench {
             g.setColor(Color.MAGENTA);
             for (Rectangle m : eval.misses()) {
                 g.draw(m);
+            }
+            g.setColor(Color.ORANGE);
+            for (Rectangle c : eval.clips()) {
+                g.draw(c);
             }
         }
         g.dispose();
@@ -277,6 +290,9 @@ public final class Bench {
             r.put("safePages", a.safePages);
             r.put("evaluatedPages", a.evaluated);
             r.put("falsePositives", a.falsePositives);
+            r.put("frontDigits", a.keeps);
+            r.put("frontClipped", a.clipped);
+            r.put("frontCoverageMean", a.keeps == 0 ? null : a.keepCoverage / a.keeps);
             int n = Math.max(1, a.pages);
             r.put("msPerPage", Map.of("render", a.render / n, "det", a.det / n, "rec", a.rec / n,
                     "pdfText", a.pdfText / n, "find", a.find / n, "wall", a.wall / n));
@@ -288,8 +304,8 @@ public final class Bench {
     private static String table(Map<String, Map<String, Agg>> summary) {
         StringBuilder sb = new StringBuilder();
         sb.append("| det | group | files | pages | targets | covered | partial | missed | recall | safe pages "
-                + "| FP masks | det ms | rec ms | wall ms/page |\n");
-        sb.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+                + "| FP masks | front clipped | front cover | det ms | rec ms | wall ms/page |\n");
+        sb.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
         summary.forEach((det, groups) -> {
             Agg total = new Agg();
             groups.forEach((group, a) -> {
@@ -307,9 +323,12 @@ public final class Bench {
         int n = Math.max(1, a.pages);
         String recall = a.targets == 0 ? "-" : String.format(Locale.ROOT, "%.3f", (double) a.covered / a.targets);
         String safe = a.evaluated == 0 ? "-" : a.safePages + "/" + a.evaluated;
-        sb.append(String.format(Locale.ROOT, "| %s | %s | %d%s | %d | %d | %d | %d | %d | %s | %s | %d | %d | %d | %d |%n",
+        String clipped = a.keeps == 0 ? "-" : a.clipped + "/" + a.keeps;
+        String cover = a.keeps == 0 ? "-" : String.format(Locale.ROOT, "%.3f", a.keepCoverage / a.keeps);
+        sb.append(String.format(Locale.ROOT,
+                "| %s | %s | %d%s | %d | %d | %d | %d | %d | %s | %s | %d | %s | %s | %d | %d | %d |%n",
                 det, group, a.files, a.errors > 0 ? " (" + a.errors + " err)" : "", a.pages, a.targets, a.covered,
-                a.partial, a.missed, recall, safe, a.falsePositives, a.det / n, a.rec / n, a.wall / n));
+                a.partial, a.missed, recall, safe, a.falsePositives, clipped, cover, a.det / n, a.rec / n, a.wall / n));
     }
 
     private static void add(Agg t, Agg a) {
@@ -323,6 +342,9 @@ public final class Bench {
         t.missed += a.missed;
         t.falsePositives += a.falsePositives;
         t.safePages += a.safePages;
+        t.keeps += a.keeps;
+        t.clipped += a.clipped;
+        t.keepCoverage += a.keepCoverage;
         t.render += a.render;
         t.det += a.det;
         t.rec += a.rec;

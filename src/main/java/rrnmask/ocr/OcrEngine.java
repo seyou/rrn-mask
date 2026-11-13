@@ -31,10 +31,11 @@ public final class OcrEngine implements AutoCloseable {
         if (threads > 0) {
             options.setIntraOpNumThreads(threads);
         }
-        det = env.createSession(detModel.toString(), options);
-        rec = env.createSession(recModel.toString(), options);
+        det = env.createSession(OnnxModelFile.load(detModel), options);
+        byte[] recBytes = OnnxModelFile.load(recModel);
+        rec = env.createSession(recBytes, options);
         detector = new TextDetector(env, det, detMaxSide);
-        recognizer = new TextRecognizer(env, rec, OnnxMetadata.read(recModel, "character"));
+        recognizer = new TextRecognizer(env, rec, OnnxModelFile.metadata(recBytes, "character"));
     }
 
     public Result read(BufferedImage image) throws OrtException {

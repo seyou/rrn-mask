@@ -30,8 +30,16 @@ public final class RrnFinder {
 
     public enum Kind { PATTERN, COLUMN }
 
-    /** {@code digits} is the folded digit string the decision was made on; it is PII, keep it out of logs. */
-    public record Finding(Rectangle mask, Kind kind, String digits) {}
+    /**
+     * @param digits     the folded digit string the decision was made on; it is PII, keep it out of logs
+     * @param abutsFront the back part directly follows the front's last digit in the same text run, no separator:
+     *                   the mask's left edge sits on a glyph boundary that an image-based refinement can sharpen
+     */
+    public record Finding(Rectangle mask, Kind kind, String digits, boolean abutsFront) {
+        public Finding withMask(Rectangle m) {
+            return new Finding(m, kind, digits, abutsFront);
+        }
+    }
 
     static final int COLUMN_MIN_DIGITS = 10;
     /** Front part: six digits, or five plus a hyphen (OCR dropped a front digit; the back still needs masking). */
@@ -88,7 +96,7 @@ public final class RrnFinder {
             }
             Rectangle mask = charRect(next, m.start(1), m.end(1) - 1);
             if (!covered(mask, out)) {
-                out.add(new Finding(mask, Kind.PATTERN, fm.group(1) + m.group(1)));
+                out.add(new Finding(mask, Kind.PATTERN, fm.group(1) + m.group(1), false));
             }
         }
     }
@@ -115,8 +123,31 @@ public final class RrnFinder {
                 Rectangle r = charRect(chain.get(ref[0]), ref[1], ref[1]);
                 mask = mask == null ? r : mask.union(r);
             }
-            out.add(new Finding(mask, Kind.PATTERN, m.group(1).replaceAll("\\D", "") + m.group(2)));
+            int lastFront = m.end(1) - 1;
+            while (!isDigit(text.charAt(lastFront))) {
+                lastFront--;
+            }
+            int[] front = refs.get(lastFront);
+            int[] back = refs.get(m.start(2));
+            boolean abuts = front[0] == back[0] && back[1] - front[1] == 1;
+            if (front[0] == back[0]) {
+                mask = overSeparator(mask, chain.get(back[0]), front[1], back[1]);
+            }
+            out.add(new Finding(mask, Kind.PATTERN, m.group(1).replaceAll("\\D", "") + m.group(2), abuts));
         }
+    }
+
+    /**
+     * When a separator ({@code -}, spaces) sits between the front's last digit and the back part, moves the
+     * mask's left edge to the middle of it. The separator is a safe margin: the first back digit gets fully
+     * covered even when its recognized position runs late, and the 6th digit is not touched.
+     */
+    private static Rectangle overSeparator(Rectangle mask, TextLine line, int lastFront, int firstBack) {
+        if (lastFront < 0 || firstBack - lastFront < 2) {
+            return mask;
+        }
+        int left = (int) Math.floor((line.charRight()[lastFront] + line.charLeft()[firstBack]) / 2);
+        return left >= mask.x ? mask : new Rectangle(left, mask.y, mask.x + mask.width - left, mask.height);
     }
 
     private static void findColumn(List<TextLine> lines, List<Finding> out) {
@@ -154,7 +185,12 @@ public final class RrnFinder {
                 while (!isDigit(norm.charAt(from))) {
                     from++;
                 }
-                out.add(new Finding(charRect(cell, from, last), Kind.COLUMN, norm.replaceAll("\\D", "")));
+                int lastFront = from - 1;
+                while (lastFront >= 0 && !isDigit(norm.charAt(lastFront))) {
+                    lastFront--;
+                }
+                Rectangle mask = overSeparator(charRect(cell, from, last), cell, lastFront, from);
+                out.add(new Finding(mask, Kind.COLUMN, norm.replaceAll("\\D", ""), from - lastFront == 1));
             }
         }
     }
@@ -240,11 +276,17 @@ public final class RrnFinder {
         return gap;
     }
 
+    /**
+     * Mask for characters {@code first..last}. The left edge is the boundary with the preceding character (for OCR
+     * the midpoint between CTC character centres) with no padding: that character is usually the 6th front
+     * digit, which must stay readable. The right edge is padded because recognition tends to clip the last
+     * glyph of a box.
+     */
     private static Rectangle charRect(TextLine line, int first, int last) {
         float avg = (float) line.box().width / Math.max(1, line.text().length());
-        float pad = (line.source() == TextLine.Source.OCR ? 0.5f : 0.15f) * avg;
-        int x0 = (int) Math.floor(line.charLeft()[first] - pad);
-        int x1 = (int) Math.ceil(line.charRight()[last] + pad);
+        float rightPad = (line.source() == TextLine.Source.OCR ? 0.5f : 0.15f) * avg;
+        int x0 = (int) Math.floor(line.charLeft()[first]);
+        int x1 = (int) Math.ceil(line.charRight()[last] + rightPad);
         return new Rectangle(x0, line.box().y, x1 - x0, line.box().height);
     }
 

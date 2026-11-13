@@ -7,11 +7,16 @@ import rrnmask.bench.Truth.PageTruth;
 import rrnmask.bench.Truth.Target;
 import rrnmask.find.RrnFinder.Finding;
 
-/** Scores one page's masks against its truth. A partially covered target is a miss: digits stay readable. */
+/**
+ * Scores one page's masks against its truth. A partially covered target is a miss: digits stay readable.
+ * A keep region (the 6th front digit) is clipped when more than {@value #CLIPPED} of it is masked.
+ */
 final class Evaluator {
     static final double COVERED = 0.95;
+    static final double CLIPPED = 0.15;
 
-    record PageEval(int targets, int covered, int partial, int missed, int falsePositives, List<Rectangle> misses) {
+    record PageEval(int targets, int covered, int partial, int missed, int falsePositives, List<Rectangle> misses,
+                    int keeps, int clipped, double keepCoverage, List<Rectangle> clips) {
         boolean safe() {
             return covered == targets;
         }
@@ -44,8 +49,25 @@ final class Evaluator {
                 missed++;
             }
         }
+        int keeps = 0;
+        int clipped = 0;
+        double keepCoverage = 0;
+        List<Rectangle> clips = new ArrayList<>();
+        for (Target k : truth.keep()) {
+            if (k.box() == null) {
+                continue;
+            }
+            Rectangle box = pixels(k.box(), width, height);
+            double f = coverage(box, findings);
+            keeps++;
+            keepCoverage += f;
+            if (f > CLIPPED) {
+                clipped++;
+                clips.add(box);
+            }
+        }
         return new PageEval(truth.targets().size(), covered, partial, missed,
-                falsePositives(truth, width, height, findings), misses);
+                falsePositives(truth, width, height, findings), misses, keeps, clipped, keepCoverage, clips);
     }
 
     static Rectangle pixels(double[] box, int width, int height) {

@@ -82,8 +82,15 @@ class RrnFinderTest {
 
     @Test
     void acceptsUnseparatedAndSpacedForms() {
-        assertEquals(1, finder.find(List.of(line(0, 0, "9001012234567"))).size());
-        assertEquals(1, finder.find(List.of(line(0, 0, "900101 - 2234567"))).size());
+        // No separator: the 6th digit spans 50..60, the back part starts at 60.
+        List<Finding> bare = finder.find(List.of(line(0, 0, "9001012234567")));
+        assertEquals(1, bare.size());
+        assertTrue(bare.getFirst().mask().x >= 60, "6th front digit stays visible: " + bare.getFirst().mask());
+        // " - ": 6th digit 50..60, separator 60..90, back from 90. The mask starts inside the separator.
+        List<Finding> spaced = finder.find(List.of(line(0, 0, "900101 - 2234567")));
+        assertEquals(1, spaced.size());
+        Rectangle m = spaced.getFirst().mask();
+        assertTrue(m.x >= 60 && m.x < 90, "starts in the separator: " + m);
     }
 
     @Test

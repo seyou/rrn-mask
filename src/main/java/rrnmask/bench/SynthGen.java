@@ -72,10 +72,15 @@ public final class SynthGen {
     private static final String[] RRN_LABELS = {"주민등록번호", "주민(법인)등록번호", "주민번호", "실명번호", "등록번호"};
     private static final FontRenderContext FRC = new FontRenderContext(null, true, true);
 
-    /** {@code start..end}: the part of {@code text} that is a target (or optional) region; start < 0 for none. */
-    private record Run(String text, float x, float baseline, float size, int start, int end, boolean optional) {
+    /** What a span of a run's text is for scoring. KEEP is the 6th front digit, which must stay readable. */
+    private enum Role { TARGET, OPTIONAL, KEEP }
+
+    /** {@code start..end} of the run's text, scored as {@code role}. */
+    private record Span(int start, int end, Role role) {}
+
+    private record Run(String text, float x, float baseline, float size, List<Span> spans) {
         Run(String text, float x, float baseline, float size) {
-            this(text, x, baseline, size, -1, -1, false);
+            this(text, x, baseline, size, List.of());
         }
     }
 
@@ -84,7 +89,7 @@ public final class SynthGen {
     private record Layout(List<Run> runs, List<Rule> rules) {}
 
     /** Region as fractions of the page. */
-    private record Region(double x, double y, double w, double h, boolean optional) {}
+    private record Region(double x, double y, double w, double h, Role role) {}
 
     private SynthGen() {}
 
@@ -151,11 +156,17 @@ public final class SynthGen {
                 Files.write(file, bytes);
                 List<Target> targets = new ArrayList<>();
                 List<Target> optional = new ArrayList<>();
+                List<Target> keep = new ArrayList<>();
                 for (Region r : regions) {
-                    (r.optional() ? optional : targets).add(new Target(null, new double[] {r.x(), r.y(), r.w(), r.h()}));
+                    List<Target> list = switch (r.role()) {
+                        case TARGET -> targets;
+                        case OPTIONAL -> optional;
+                        case KEEP -> keep;
+                    };
+                    list.add(new Target(null, new double[] {r.x(), r.y(), r.w(), r.h()}));
                 }
                 json.writeValue(file.resolveSibling(file.getFileName() + ".truth.json").toFile(),
-                        new Truth(kind, List.of(new PageTruth(1, targets, optional))));
+                        new Truth(kind, List.of(new PageTruth(1, targets, optional, keep))));
             }
         }
         System.out.println("wrote " + count * 5 + " documents to " + out);
@@ -209,8 +220,9 @@ public final class SynthGen {
         String corpLabel = "법인등록번호: ";
         String[] own = corpNumber(r);
         String corpLine = corpLabel + own[0] + "-" + own[1];
-        runs.add(new Run(corpLine, PAGE_W - margin - width(font, corpLine, s), y, s,
-                corpLabel.length() + 7, corpLine.length(), true));
+        runs.add(new Run(corpLine, PAGE_W - margin - width(font, corpLine, s), y, s, List.of(
+                new Span(corpLabel.length() + 5, corpLabel.length() + 6, Role.KEEP),
+                new Span(corpLabel.length() + 7, corpLine.length(), Role.OPTIONAL))));
         y += s * 2.6f;
 
         int variant = r.nextInt(3);
@@ -237,17 +249,18 @@ public final class SynthGen {
             String shares = String.format(Locale.ROOT, "%,d", 100 + r.nextInt(2_000_000));
             Run[] row = switch (variant) {
                 case 0 -> new Run[] {cell(Integer.toString(i + 1)), cell(name),
-                        numberCell(num[0] + sep + back, num[0].length() + sep.length(), masked, corp),
+                        numberCell(num[0] + sep + back, 6, num[0].length() + sep.length(), masked, corp),
                         cell(pick(r, ADDRESSES)), cell(shares),
                         cell(String.format(Locale.ROOT, "%.2f%%", r.nextFloat() * 40))};
                 case 1 -> new Run[] {cell(Integer.toString(i + 1)), cell(name),
-                        numberCell(num[0] + sep + back, num[0].length() + sep.length(), masked, corp),
+                        numberCell(num[0] + sep + back, 6, num[0].length() + sep.length(), masked, corp),
                         cell(r.nextFloat() < 0.8f ? "보통주" : "우선주"), cell(shares),
                         cell(String.format(Locale.ROOT, "20%02d-%02d-%02d", r.nextInt(26), 1 + r.nextInt(12),
                                 1 + r.nextInt(28))),
                         cell(r.nextFloat() < 0.15f ? "대표이사" : "")};
-                default -> new Run[] {cell(Integer.toString(i + 1)), cell(name), cell(num[0]),
-                        numberCell(back, 0, masked, corp), cell(pick(r, ADDRESSES)), cell(shares)};
+                default -> new Run[] {cell(Integer.toString(i + 1)), cell(name),
+                        new Run(num[0], 0, 0, 0, List.of(new Span(5, 6, Role.KEEP))),
+                        numberCell(back, 0, 0, masked, corp), cell(pick(r, ADDRESSES)), cell(shares)};
             };
             cells.add(row);
         }
@@ -279,8 +292,7 @@ public final class SynthGen {
             for (int c = 0; c < row.length; c++) {
                 Run cell = row[c];
                 if (!cell.text().isEmpty()) {
-                    runs.add(new Run(cell.text(), colX[c] + pad, rowTop + rowH * 0.68f, s, cell.start(), cell.end(),
-                            cell.optional()));
+                    runs.add(new Run(cell.text(), colX[c] + pad, rowTop + rowH * 0.68f, s, cell.spans()));
                 }
             }
         }
@@ -314,9 +326,19 @@ public final class SynthGen {
         return new Run(text, 0, 0, 0);
     }
 
-    /** Back seven digits are a target (optional for corporate numbers); an already masked number is neither. */
-    private static Run numberCell(String text, int backStart, boolean masked, boolean corp) {
-        return masked ? cell(text) : new Run(text, 0, 0, 0, backStart, backStart + 7, corp);
+    /**
+     * Back seven digits are a target (optional for corporate numbers); an already masked number is neither.
+     * The front digit just before {@code frontEnd} must stay visible ({@code frontEnd} 0: front in another cell).
+     */
+    private static Run numberCell(String text, int frontEnd, int backStart, boolean masked, boolean corp) {
+        List<Span> spans = new ArrayList<>();
+        if (frontEnd > 0) {
+            spans.add(new Span(frontEnd - 1, frontEnd, Role.KEEP));
+        }
+        if (!masked) {
+            spans.add(new Span(backStart, backStart + 7, corp ? Role.OPTIONAL : Role.TARGET));
+        }
+        return new Run(text, 0, 0, 0, spans);
     }
 
     private static float[] columnWidths(Font font, String[] headers, List<Run[]> cells, float s, float pad) {
@@ -360,13 +382,13 @@ public final class SynthGen {
             Font f = font.deriveFont(run.size() * sc);
             g.setFont(f);
             g.drawString(run.text(), run.x() * sc, run.baseline() * sc);
-            if (run.start() >= 0) {
-                FontRenderContext frc = g.getFontRenderContext();
-                double x0 = run.x() * sc + f.getStringBounds(run.text().substring(0, run.start()), frc).getWidth();
-                double x1 = run.x() * sc + f.getStringBounds(run.text().substring(0, run.end()), frc).getWidth();
+            FontRenderContext frc = g.getFontRenderContext();
+            for (Span span : run.spans()) {
+                double x0 = run.x() * sc + f.getStringBounds(run.text().substring(0, span.start()), frc).getWidth();
+                double x1 = run.x() * sc + f.getStringBounds(run.text().substring(0, span.end()), frc).getWidth();
                 double top = (run.baseline() - 0.72 * run.size()) * sc;
                 double bottom = (run.baseline() + 0.02 * run.size()) * sc;
-                regions.add(new Region(x0 / w, top / h, (x1 - x0) / w, (bottom - top) / h, run.optional()));
+                regions.add(new Region(x0 / w, top / h, (x1 - x0) / w, (bottom - top) / h, span.role()));
             }
         }
         g.dispose();
@@ -408,7 +430,7 @@ public final class SynthGen {
                 maxX = Math.max(maxX, p.getX());
                 maxY = Math.max(maxY, p.getY());
             }
-            regions.set(i, new Region(minX / w, minY / h, (maxX - minX) / w, (maxY - minY) / h, reg.optional()));
+            regions.set(i, new Region(minX / w, minY / h, (maxX - minX) / w, (maxY - minY) / h, reg.role()));
         }
         if (scan.lowRes() < 1) {
             BufferedImage small = Images.resize(dst, (int) (w * scan.lowRes()), (int) (h * scan.lowRes()));
@@ -447,13 +469,13 @@ public final class SynthGen {
                     cs.newLineAtOffset(run.x(), PAGE_H - run.baseline());
                     cs.showText(run.text());
                     cs.endText();
-                    if (run.start() >= 0) {
-                        double x0 = run.x() + font.getStringWidth(run.text().substring(0, run.start())) / 1000 * run.size();
-                        double x1 = run.x() + font.getStringWidth(run.text().substring(0, run.end())) / 1000 * run.size();
+                    for (Span span : run.spans()) {
+                        double x0 = run.x() + font.getStringWidth(run.text().substring(0, span.start())) / 1000 * run.size();
+                        double x1 = run.x() + font.getStringWidth(run.text().substring(0, span.end())) / 1000 * run.size();
                         double top = run.baseline() - 0.72 * run.size();
                         double bottom = run.baseline() + 0.02 * run.size();
                         regions.add(new Region(x0 / PAGE_W, top / PAGE_H, (x1 - x0) / PAGE_W, (bottom - top) / PAGE_H,
-                                run.optional()));
+                                span.role()));
                     }
                 }
             }
